@@ -1,0 +1,58 @@
+
+#search-form .form-radios,
+#search-form .form-checkboxes {
+	float: right;
+	width: 550px;
+}
+
+/* The form widget have a margin top. The description need a similar margin to appear at the same height. */
+#search-form .description {
+	width: 350px;
+	font-size: 1em;
+	margin-top: 0.4em;
+}
+
+#search-form .form-type-radios,
+#search-form .form-type-checkboxes {
+	overflow: auto;
+}
+
+#search-form .description p {
+	color: #999999;
+	font-size: 0.8em;
+}
+
+/*
+/ * The search field * /
+#edit-basic {
+	float: left;
+}
+
+#edit-search-scope {
+	/ * Padding works better because the radios are floating * /
+	padding-left: 20px;
+	margin-top: 20px;
+}
+
+#edit-search-scope .form-type-radio {
+	float: left;
+	padding-right: 50px;
+}
+
+#edit-search-categories .form-type-checkbox {
+	float: left;
+	padding-right: 50px;
+}
+
+#edit-search-categories {
+	/ * To be sure it's not floating next to the search field, when the radio are not there * /
+	clear: both;
+}
+
+/ * Better than clear:both after (cross-browser and do not break the layout when floating columns are present) * /
+#edit-search-scope,
+#edit-search-categories,
+.search-form {
+	overflow: auto;
+}
+*/

@@ -1,0 +1,20 @@
+; $Id$
+name = eAtlas search
+description = [eatlas_search] This module add search capabilities through files and node types, filtering by branding when possible.
+core = 7.x
+
+files[] = eatlas_search.module
+files[] = includes/eatlas_search_unicode.inc
+files[] = includes/eatlas_search_node.inc
+files[] = includes/eatlas_search_file.inc
+files[] = includes/eatlas_search_aggregator.inc
+
+stylesheets[all][] = css/eatlas_search_style.css
+
+package = eAtlas
+
+; Attributes used by the update module.
+; There fields needs to be removed if the module is migrated to Drupal.org
+project status url = "http://drupal.eatlas.org.au/modules/eatlas"
+version = "7.x-1.5"
+project = "eatlas_search"

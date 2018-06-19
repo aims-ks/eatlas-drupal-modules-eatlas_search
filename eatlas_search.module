@@ -1,0 +1,814 @@
+<?php
+// $Id$
+
+define('EATLAS_SEARCH_PATH', 'all');
+define('EATLAS_SEARCH_TITLE', 'eAtlas');
+
+define('EATLAS_SEARCH_DEFAULT_SCOPE', TRUE); // FALSE = Entire site, TRUE = Current branding
+define('EATLAS_SEARCH_PARAM_SCOPE', 'scope');
+
+define('EATLAS_SEARCH_INDEX_NODE', 'ea_node');
+define('EATLAS_SEARCH_INDEX_FILE', 'ea_file');
+define('EATLAS_SEARCH_INDEX_RSS', 'ea_rss');
+
+define('EATLAS_SEARCH_NODE_PREPRESS_FIELD', 'field_draft');
+
+module_load_include('inc', 'eatlas_search', 'includes/eatlas_search_unicode');
+module_load_include('inc', 'eatlas_search', 'includes/eatlas_search_node');
+module_load_include('inc', 'eatlas_search', 'includes/eatlas_search_file');
+module_load_include('inc', 'eatlas_search', 'includes/eatlas_search_aggregator');
+
+/**
+ * Configuration of the search.
+ * This module has been made to be easy to configure, and easy to
+ * extend (in the future) with a GUI to configure it.
+ *
+ * Returns: Array of search options.
+ *
+ * Definition of a search option:
+ * array(
+ *     'id': (string) URL Parameter
+ *     'label': (string) Value displayed in the advanced search form
+ *     Objects to index / search for (the presence of the attribute determine the type; node, file or aggregator)
+ *         Node:
+ *             'content_types': (array of strings) Node types to index / search for ('article', 'person', etc)
+ *         File:
+ *             'file_types': (array of strings) Type of file to index / search for ('image', 'audio', 'video' or 'default')
+ *         Aggregator:
+ *             'feed_ids': (array of integers) Feed IDS to index / search for (the numeric feed, example: 40)
+ *     'default': (boolean) Default state of the checkbox (TRUE: Checked, FALSE: Not checked)
+ * )
+ *
+ * NOTE:
+ * Indexed fields and displayed fields for Nodes are defined in the
+ * content type configuration "manage display" for "Display view mode":
+ *     eAtlas search result
+ *     and
+ *     eAtlas search index
+ *
+ * *WARNING*
+ * Due to incomplete API associated with aggregator feeds, it is strongly
+ * recommended to harvest feeds as node rather than the default aggregator
+ * item, and specified the node type in the search config.
+ */
+function _eatlas_search_get_advanced_search_config() {
+	return array(
+		array(
+			'id' => 'ea_art',
+			'label' => 'Articles / Presentations / Reports',
+			'content_types' => array('article', 'external_content'),
+			'default' => TRUE
+		),
+		array(
+			'id' => 'ea_img',
+			'label' => 'Images / Photo galleries',
+			'file_types' => array('image'),
+			'content_types' => array('gallery'),
+			'default' => TRUE
+		),
+
+		array(
+			'id' => 'ea_vid',
+			'label' => 'Video',
+			'content_types' => array('video'),
+			'default' => TRUE
+		),
+
+		array(
+			'id' => 'ea_other',
+			'label' => 'PDF, DOC, XLS and other documents',
+			'file_types' => array('default'),
+			'default' => FALSE
+		),
+
+		array(
+			'id' => 'ea_mtd',
+			'label' => 'Metadata',
+			//'feed_ids' => array(40),
+			'content_types' => array('eatlas_georss_item'),
+			'default' => TRUE
+		),
+		array(
+			'id' => 'ea_prj',
+			'label' => 'Projects / Research programs',
+			'content_types' => array('project', 'research_program'),
+			'default' => TRUE
+		),
+		array(
+			'id' => 'ea_ppl',
+			'label' => 'People / Organisations',
+			'content_types' => array('person', 'organisation', 'organisation_section'),
+			'default' => FALSE
+		),
+		array(
+			'id' => 'ea_doc',
+			'label' => 'Site pages / Submission forms / eAtlas documentation',
+			'content_types' => array('page', 'ereefs_member'),
+			'default' => TRUE
+		)
+	);
+}
+
+/**
+ * Implements hook_entity_info_alter().
+ * Add the view mode "eAtlas search result" (for some reason, the "search_result" mode do not work)
+ * Since we add "eAtlas search result", better also add "eAtlas search index" to be consistent.
+ */
+function eatlas_search_entity_info_alter(&$entity_info) {
+	$entity_info['node']['view modes']['eatlas_search_result'] = array(
+		'label' => t('eAtlas search result'),
+		'custom settings' => FALSE // Default: disabled
+	);
+	$entity_info['node']['view modes']['eatlas_search_index'] = array(
+		'label' => t('eAtlas search index'),
+		'custom settings' => FALSE // Default: disabled
+	);
+}
+
+/**
+ * Implements: hook_preprocess_HOOK
+ *   https://api.drupal.org/api/drupal/modules%21system%21theme.api.php/function/hook_preprocess_HOOK/7.x
+ * Changes the search form to use the "search" input element of HTML5.
+ * See: https://www.drupal.org/node/154137
+ * NOTE: This solution can't be used with the advanced search (it's not a block).
+ */
+function eatlas_search_preprocess_search_block_form(&$vars) {
+	$vars['search_form'] = str_replace('type="text"', 'type="search"', $vars['search_form']);
+}
+
+/**
+ * Implements hook_form_FORM_ID_alter.
+ * Modify the search form block to add the search_scope to the URL, to make the URL session independent.
+ */
+function eatlas_search_form_search_block_form_alter(&$form, &$form_state, $form_id) {
+	$form['#submit'][] = '_eatlas_search_block_form_submit';
+}
+function _eatlas_search_block_form_submit($form, &$form_state) {
+	$query = array();
+
+	if (EATLAS_SEARCH_DEFAULT_SCOPE && module_exists('eatlas_branding')) {
+		$current_branding = eatlas_branding_get_branding_id();
+		if ($current_branding) {
+			$query[EATLAS_SEARCH_PARAM_SCOPE] = $current_branding;
+		}
+	}
+
+	if (!empty($query)) {
+		$form_state['redirect'] = array($form_state['redirect'], array('query' => $query));
+	}
+}
+
+/**
+ * Implement: hook_form_FORM_ID_alter
+ * Modify search form to add content type filter and branding filter - without hacking the core
+ *     ...whenever I hack the core, a kitten dies...
+ * NOTE: There is the other search form ID I have found:
+ *     'search_theme_form': This form ID seems to only be used in D6 and earlier - ignored.
+ *     'search_block_form': Search block on top of the page - leave untouched (use the default content type filter).
+ */
+function eatlas_search_form_search_form_alter(&$form, &$form_state, $form_id) {
+	$searchConfig = _eatlas_search_get_advanced_search_config();
+
+	$form['advanced_search'] = array(
+		'#type' => 'fieldset',
+		'#title' => t('Advanced search'),
+		'#collapsible' => TRUE,
+		'#collapsed' => TRUE
+	);
+
+	if (EATLAS_SEARCH_DEFAULT_SCOPE && module_exists('eatlas_branding')) {
+		$current_branding_id = eatlas_branding_get_branding_id();
+		$default_branding_id = _eatlas_search_get_default_branding_id();
+
+		// Search scope - Scope used to filter the search result for a certain branding.
+		//     (the value of this variable is also a branding)
+		//     It is either default branding, current branding or something else (see note bellow)
+		// NOTE: It may be a different branding than the current branding, in case the user
+		//     copy paste a URL from someone who was looking at the search results for an
+		//     other branding.
+		$search_scope = _eatlas_search_get_url_branding_id($current_branding_id, $form_state);
+
+		// Construct the associative array "key => value" for the radios
+		$options = array(
+			$default_branding_id => t('All (complete eAtlas)')
+		);
+		if ($current_branding_id !== $default_branding_id) {
+			$current_branding = eatlas_branding_branding_load($current_branding_id);
+			if (property_exists($current_branding, 'term')) {
+				$options[$current_branding_id] = $current_branding->term->name;
+			}
+		}
+		// Rare case: The user is viewing the web site in some branding,
+		// copy paste a URL of search results for a different branding.
+		// The new branding has to be display in the options.
+		if ($search_scope !== $default_branding_id && $search_scope !== $current_branding_id) {
+			$scope_branding = eatlas_branding_branding_load($search_scope);
+			if (property_exists($scope_branding, 'term')) {
+				$options[$search_scope] = $scope_branding->term->name;
+			}
+		}
+
+		// Add the search scope radio buttons ONLY if there is multiple choices available
+		// (I.E. the user is not viewing the page using the default (eAtlas) branding)
+		if (count($options) > 1) {
+			// Radios API:
+			//     https://api.drupal.org/api/drupal/developer!topics!forms_api_reference.html/7#radios
+			$form['advanced_search']['search_scope'] = array(
+				'#type' => 'radios',
+				'#default_value' => $search_scope,
+				'#options' => $options,
+				'#description' => 'Search Regions / Sites' .
+					'<p><b>Tip:</b> Use the <i>All</i> option to broaden the search to include items in from all regions and topics.</p>' .
+					'<p>For example if you are in the Torres Strait eAtlas but wish to include search content outside this region select <i>All</i>.</p>'
+			);
+		}
+	}
+
+	// Get the filter value from the URL (wether the checkboxes were checked or not when the form was submitted)
+	// or use the default value (when the URL parameters are not defined)
+	$search_categories = array();
+	$checkboxes = array();
+	foreach ($searchConfig as $searchItem) {
+		if (isset($searchItem['id'])) {
+			$url_value = isset($_GET[$searchItem['id']]) ? $_GET[$searchItem['id']] : $searchItem['default'];
+			$checkboxes[$searchItem['id']] = $searchItem['label'];
+			if ($url_value) {
+				$search_categories[] = $searchItem['id'];
+			}
+		}
+	}
+
+	// Checkboxes API:
+	//     https://api.drupal.org/api/drupal/developer!topics!forms_api_reference.html/7#checkboxes
+	$form['advanced_search']['search_categories'] = array(
+		'#type' => 'checkboxes',
+		'#options' => $checkboxes,
+		'#default_value' => $search_categories,
+		'#description' => 'Search by content type' .
+			'<p><b>Tip:</b> Check the boxes next to content you\'d like to see come up in searches.</p>'
+	);
+
+	// Add a function, called when the form is submited, to managed the new values.
+	// NOTE: The function called prior to that is: search_form_submit
+	$form['#submit'][] = '_eatlas_search_form_submit';
+}
+
+// Add filter values to the form URL (search for node, image, metadata, etc.)
+// TODO The right way to do this seems to get the values from $form_state['values']
+function _eatlas_search_form_submit($form, &$form_state) {
+	$searchConfig = _eatlas_search_get_advanced_search_config();
+
+	// Grab the categories filter values from the form (checkboxes)
+	$searchCategories = $form['advanced_search']['search_categories']['#value'];
+
+	// Build the URL query
+	// (this array is used by Drupal to create parameters of the form redirection URL)
+	$query = array();
+	foreach ($searchConfig as $searchItem) {
+		if (isset($searchItem['id'])) {
+			if (isset($searchCategories[$searchItem['id']]) !== $searchItem['default']) {
+				$query[$searchItem['id']] = isset($searchCategories[$searchItem['id']]);
+			}
+		}
+	}
+
+	// Grab the scope filter values from the form (radio - when searching from a branding page)
+	if (isset($form['advanced_search']['search_scope'])) {
+		$searchScope = $form['advanced_search']['search_scope']['#value'];
+		// Always put scope in URL, to make the URL independent from the session as much as possible
+		$query[EATLAS_SEARCH_PARAM_SCOPE] = $searchScope;
+	}
+
+	// Set the URL parameters (query string) to the form URL.
+	// This variable behave the same way as the URL function:
+	//     https://api.drupal.org/api/drupal/includes%21form.inc/function/drupal_redirect_form/7
+	//     https://api.drupal.org/api/drupal/includes!common.inc/function/url/7
+	if (!empty($query)) {
+		$form_state['redirect'] = array($form_state['redirect'], array('query' => $query));
+	}
+}
+
+/**
+ * Methods to make this module work as a Search module
+ */
+
+
+// Implement: hook_search_info
+function eatlas_search_search_info() {
+	return array(
+		'title' => EATLAS_SEARCH_TITLE,
+		'path' => EATLAS_SEARCH_PATH,
+	);
+}
+
+function _eatlas_search_get_default_branding_id() {
+	return defined('EATLAS_BRANDING_DEFAULT_BRANDING_ID') ? EATLAS_BRANDING_DEFAULT_BRANDING_ID : NULL;
+}
+
+// Return the branding set in the URL parameter
+// NOTE: current_branding is set to FALSE by default, because the current branding can be NULL.
+function _eatlas_search_get_url_branding_id($current_branding_id = FALSE, $form_state = NULL) {
+	if ($current_branding_id === FALSE && module_exists('eatlas_branding')) {
+		$current_branding_id = eatlas_branding_get_branding_id();
+	}
+
+	// Retrieve and validate the branding from the URL
+	$url_branding_id = isset($_GET[EATLAS_SEARCH_PARAM_SCOPE]) ? strip_tags($_GET[EATLAS_SEARCH_PARAM_SCOPE]) : NULL;
+
+	// This is only used when the user submit the search form after using a URL that refer
+	// to a branding that is different from the current branding.
+	// At this exact point in the Drupal workflow, the branding is not in the URL anymore. It's only in the form state.
+	// If the branding is not added back to the list of branding (radio), the automatic form
+	// validation will fire an error because the search scope will not be one of the options
+	// available in the form.
+	if (!$url_branding_id && isset($form_state['input']['search_scope'])) {
+		$url_branding_id = $form_state['input']['search_scope'];
+	}
+
+	$default_branding_id = _eatlas_search_get_default_branding_id();
+
+	return $url_branding_id ? $url_branding_id : (EATLAS_SEARCH_DEFAULT_SCOPE ? $current_branding_id : $default_branding_id);
+}
+
+/**
+ * Implement: hook_search_execute
+ */
+function eatlas_search_search_execute($keys, $conditions) {
+	$searchConfig = _eatlas_search_get_advanced_search_config();
+
+	$query = db_select('search_index', 'i', array('target' => 'slave'))->extend('SearchQuery')->extend('PagerDefault');
+
+	// The headache starts here - Building the Mega search query
+	$query_content_types = array();
+	$query_file_types = array();
+	$query_aggregator_feed_ids = array();
+
+	foreach ($searchConfig as $searchItem) {
+		if (isset($searchItem['id'])) {
+			// Get the value from the form (checked or not => inlcude the results or filter them out)
+			$url_value = isset($_GET[$searchItem['id']]) ? $_GET[$searchItem['id']] : $searchItem['default'];
+
+			// Node search (articles, people, organisations, etc.)
+			if (isset($searchItem['content_types'])) {
+				if ($url_value && isset($searchItem['content_types'])) {
+					foreach($searchItem['content_types'] as $content_type) {
+						$query_content_types[] = $content_type;
+					}
+				}
+			}
+			// File search (images)
+			if (isset($searchItem['file_types'])) {
+				if ($url_value && isset($searchItem['file_types'])) {
+					foreach($searchItem['file_types'] as $file_type) {
+						$query_file_types[] = $file_type;
+					}
+				}
+			}
+			// Aggregator search (metadata)
+			if (isset($searchItem['feed_ids'])) {
+				if ($url_value && isset($searchItem['feed_ids'])) {
+					foreach($searchItem['feed_ids'] as $feed_id) {
+						$query_aggregator_feed_ids[] = $feed_id;
+					}
+				}
+			}
+		}
+	}
+
+	// The "not_empty" condition removes orphans index associated with deleted items.
+	$not_empty = db_or();
+
+	if (!empty($query_content_types)) {
+		$not_empty->isNotNull('n.type');
+		// Remove private nodes (leftJoin => Collect those fields only for items that are Nodes)
+		$query->leftJoin('node', 'n', "n.nid = i.sid AND i.type = '".EATLAS_SEARCH_INDEX_NODE."'");
+		$query->leftJoin('field_data_' . EATLAS_SEARCH_NODE_PREPRESS_FIELD, 'fd', "fd.entity_id = n.nid AND fd.entity_type = 'node' AND fd.bundle = n.type");
+		$node_or = db_or();
+		$node_or->isNull('n.status');
+		$node_or->condition('n.status', '1', '=');
+		$query->condition($node_or);
+
+		$draft_or = db_or();
+		$draft_or->isNull('fd.' . EATLAS_SEARCH_NODE_PREPRESS_FIELD . '_value');
+		$draft_or->condition('fd.' . EATLAS_SEARCH_NODE_PREPRESS_FIELD . '_value', '0', '=');
+		$query->condition($draft_or);
+
+		$content_types_or = db_or();
+		$content_types_or->isNull('n.type');
+		$content_types_or->condition('n.type', $query_content_types, 'IN');
+		$query->condition($content_types_or);
+	}
+
+	if (!empty($query_file_types)) {
+		$not_empty->isNotNull('f.type');
+		// Remove private images (leftJoin => Collect those fields only for items that are Files)
+		$query->leftJoin('file_managed', 'f', "f.fid = i.sid AND i.type = '".EATLAS_SEARCH_INDEX_FILE."'");
+		$query->leftJoin('field_data_field_restricted_access', 'p', "p.entity_id = f.fid AND p.entity_type = 'file' AND p.bundle = f.type");
+		$file_or = db_or();
+		$file_or->isNull('p.field_restricted_access_value');
+		$file_or->condition('p.field_restricted_access_value', '0', '=');
+		$query->condition($file_or);
+
+		$file_types_or = db_or();
+		$file_types_or->isNull('f.type');
+		$file_types_or->condition('f.type', $query_file_types, 'IN');
+		$query->condition($file_types_or);
+	}
+
+	if (!empty($query_aggregator_feed_ids)) {
+		$not_empty->isNotNull('a.fid');
+		// Remove RSS items that are not associated with the aggregator
+		$query->leftJoin('aggregator_item', 'a', "a.iid = i.sid AND i.type = '".EATLAS_SEARCH_INDEX_RSS."'");
+
+		$node_or = db_or();
+		$node_or->isNull('a.fid');
+		$node_or->condition('a.fid', $query_aggregator_feed_ids, 'IN');
+		$query->condition($node_or);
+	}
+
+	// Remove orphan index
+	$query->condition($not_empty);
+
+	// Add branding filter to the query
+	// NOTE: $branding_id is NULL when the module eatlas_branding is not enabled.
+	if (EATLAS_SEARCH_DEFAULT_SCOPE && module_exists('eatlas_branding')) {
+		$branding_id = _eatlas_search_get_url_branding_id();
+		$branding_filter = FALSE;
+
+		$branding_br_juncture = array();
+		$branding_sbr_juncture = array();
+		if (!empty($query_content_types)) {
+			$branding_br_juncture[] = 'br.bundle = n.type AND br.entity_id = n.nid';
+			$branding_sbr_juncture[] = 'sbr.bundle = n.type AND sbr.entity_id = n.nid';
+			$branding_filter = TRUE;
+		}
+		if (!empty($query_file_types)) {
+			$branding_br_juncture[] = 'br.bundle = f.type AND br.entity_id = f.fid';
+			$branding_sbr_juncture[] = 'sbr.bundle = f.type AND sbr.entity_id = f.fid';
+			$branding_filter = TRUE;
+		}
+
+		if ($branding_filter) {
+			$query->leftJoin('field_data_' . EATLAS_BRANDING_FIELD_BRANDING, 'br', implode(' OR ', $branding_br_juncture));
+			$query->leftJoin('field_data_' . EATLAS_BRANDING_FIELD_SUPPORTED_BRANDINGS, 'sbr', implode(' OR ', $branding_sbr_juncture));
+
+			$bundle_or = db_or();
+			// Add filter: entity_type = 'node' AND bundle IN ('article', 'person', ...)
+			if (!empty($query_content_types)) {
+				if ($branding_id === _eatlas_search_get_default_branding_id()) {
+					$bundle_br_nulland = db_and();
+					$bundle_br_nulland->isNull('br.entity_type');
+					$bundle_br_nulland->isNull('br.bundle');
+					$bundle_or->condition($bundle_br_nulland); // entity_type IS NULL AND bundle IS NULL (nodes that do not have branding)
+				}
+
+				$bundle_br_and = db_and();
+				$bundle_br_and->condition('br.entity_type', 'node', '=');
+				$bundle_br_and->condition('br.bundle', $query_content_types, 'IN');
+				$bundle_or->condition($bundle_br_and); // entity_type = 'node' AND bundle = '...'
+			}
+			// Add filter: entity_type = 'file' AND bundle IN ('image', ...)
+			if (!empty($query_file_types)) {
+				if ($branding_id === _eatlas_search_get_default_branding_id()) {
+					$bundle_sbr_nulland = db_and();
+					$bundle_sbr_nulland->isNull('sbr.entity_type');
+					$bundle_sbr_nulland->isNull('sbr.bundle');
+					$bundle_or->condition($bundle_sbr_nulland);
+				}
+
+				$bundle_sbr_and = db_and();
+				$bundle_sbr_and->condition('sbr.entity_type', 'file', '=');
+				$bundle_sbr_and->condition('sbr.bundle', $query_file_types, 'IN');
+				$bundle_or->condition($bundle_sbr_and);
+			}
+			// Add filter: (entity_type = 'node' AND bundle IN ('article', 'person', ...)) OR (entity_type = 'file' AND bundle IN ('image', ...))
+			// NOTE: bundle_or can not be empty since to enter this block, either $query_content_types and/or $query_file_types must not be empty.
+			$query->condition($bundle_or);
+
+			// Add filter: (field_branding_tid = 40 OR field_supported_brandings_tid = 40)
+			$branding_or = db_or();
+			$branding_or->condition('br.' . EATLAS_BRANDING_FIELD_BRANDING . '_tid', $branding_id, '=');
+			$branding_or->condition('sbr.' . EATLAS_BRANDING_FIELD_SUPPORTED_BRANDINGS . '_tid', $branding_id, '=');
+			if ($branding_id === _eatlas_search_get_default_branding_id()) {
+				$branding_or->isNull('br.' . EATLAS_BRANDING_FIELD_BRANDING . '_tid');
+				$branding_or->isNull('sbr.' . EATLAS_BRANDING_FIELD_SUPPORTED_BRANDINGS . '_tid');
+			}
+			$query->condition($branding_or);
+		}
+	}
+
+	$modules = array();
+	if (!empty($query_content_types)) {
+		$modules[] = EATLAS_SEARCH_INDEX_NODE;
+	}
+	if (!empty($query_file_types)) {
+		$modules[] = EATLAS_SEARCH_INDEX_FILE;
+	}
+	if (!empty($query_aggregator_feed_ids)) {
+		$modules[] = EATLAS_SEARCH_INDEX_RSS;
+	}
+
+	if (empty($modules)) {
+		return array();
+	}
+
+	// Search in node, image and aggregator items ($keys is the search keywords)
+	// NOTE: [Undocumented feature] searchExpression accept array as value because it's sent to a "condition" which accept array.
+	$query->searchExpression($keys, $modules);
+
+	// Only continue if the first pass query matches.
+	if (!$query->executeFirstPass()) {
+		return array();
+	}
+
+	// Call the ranking method, defined in Drupal core node module.
+	// It quite generic and can be apply to all the different types used in here (node, file, etc).
+	//     https://api.drupal.org/api/drupal/modules%21node%21node.module/function/_node_rankings/7
+	// NOTE: Do not confound with "node_ranking()"
+	_node_rankings($query);
+
+	$find = $query
+		->limit(10)
+		->execute();
+	$results = array();
+	foreach ($find as $item) {
+		switch ($item->type) {
+			case EATLAS_SEARCH_INDEX_NODE:
+				$results[] = _eatlas_search_node_to_result($item, $keys);
+				break;
+			case EATLAS_SEARCH_INDEX_FILE:
+				$results[] = _eatlas_search_file_to_result($item, $keys);
+				break;
+			case EATLAS_SEARCH_INDEX_RSS:
+				$results[] = _eatlas_search_aggregator_item_to_result($item, $keys);
+				break;
+		}
+	}
+
+	return $results;
+}
+
+/*
+// Implements: hook_ranking().
+function eatlas_search_ranking() {
+	// Use the variable "node_rank_derank_files" to multiply the rank
+	// of all results which are NOT a file.
+	// Initial value: eatlas_search.install
+	// Config: http://.../admin/config/search/settings
+	return array(
+		'derank_files' => array(
+			'title' => t('De-rank files'),
+			'score' => ' f.type IS NULL',
+		),
+	);
+}*/
+
+/**
+ * Implements hook_search_admin().
+ */
+function eatlas_search_search_admin() {
+	// Display the "Ranking" configuration
+	return node_search_admin();
+}
+
+// The "search_excerpt" method is picky; it works better without HTML, excess whitespace or new lines.
+function _eatlas_search_excerpt($keys, $text) {
+	return search_excerpt($keys, preg_replace('/\s+/', ' ', strip_tags($text)));
+}
+
+function _eatlas_search_delete_index($sid, $type) {
+	$delete_index = db_delete('search_index', array('target' => 'slave'));
+	$delete_index->condition('sid', $sid, '=');
+	$delete_index->condition('type', $type, '=');
+	$num_words_deleted = $delete_index->execute();
+
+	// search_node_links (I don't know where this is used)
+	//     sid => Index element which has a link to the node (nid)
+	//     nid => Node refered by the link
+	$delete_node_links = db_delete('search_node_links', array('target' => 'slave'));
+	$delete_node_links->condition('sid', $sid, '=');
+	$delete_node_links->condition('type', $type, '=');
+	$num_links_deleted = $delete_node_links->execute();
+
+	// If it's a node, also delete refences pointing to that node
+	if ($type === EATLAS_SEARCH_INDEX_NODE) {
+		$delete_node_links = db_delete('search_node_links', array('target' => 'slave'));
+		$delete_node_links->condition('nid', $sid, '=');
+		$delete_node_links->condition('type', $type, '=');
+		$num_links_deleted += $delete_node_links->execute();
+	}
+
+	// search_dataset
+	// Indexed items (nodes, files, rss, etc) and its metadata (re-index flag, indexed data, etc.)
+	$delete_dataset = db_delete('search_dataset', array('target' => 'slave'));
+	$delete_dataset->condition('sid', $sid, '=');
+	$delete_dataset->condition('type', $type, '=');
+	$num_dataset_deleted = $delete_dataset->execute();
+
+	return $num_dataset_deleted;
+}
+
+/**
+ * Implements hook_search_access().
+ * User is allowed to use the search if he is allowed to view nodes.
+ * TODO: Create a custom configuration for search access. (not a priority since it's public)
+ */
+function eatlas_search_search_access() {
+	return user_access('access content');
+}
+
+
+
+/**************
+ * INDEXATION *
+ **************/
+
+
+
+/**
+ * Implements hook_search_reset().
+ * Mark all indexes to be re-indexed during the next cron job.
+ */
+function eatlas_search_search_reset() {
+	db_update('search_dataset')
+		->fields(array('reindex' => REQUEST_TIME))
+		->condition('type', array(EATLAS_SEARCH_INDEX_NODE, EATLAS_SEARCH_INDEX_FILE, EATLAS_SEARCH_INDEX_RSS), 'IN')
+		->execute();
+}
+
+/**
+ * Implements hook_search_status().
+ * Used in search status to tell how many items need to be re-indexed.
+ */
+function eatlas_search_search_status() {
+	$nodes_status = _eatlas_search_nodes_status();
+	$files_status = _eatlas_search_files_status();
+	$aggregator_status = _eatlas_search_aggregator_status();
+
+	return array(
+		'remaining' => $nodes_status['remaining'] + $files_status['remaining'] + $aggregator_status['remaining'],
+		'total' => $nodes_status['total'] + $files_status['total'] + $aggregator_status['total']
+	);
+}
+
+/**
+ * Implement: hook_update_index
+ * Index new items or modified items (nodes, images or aggregator items)
+ */
+function eatlas_search_update_index() {
+	_eatlas_search_remove_orphan_index();
+
+	$limit = (int)variable_get('search_cron_limit', 100);
+
+	$nodes_status = _eatlas_search_nodes_status();
+	$files_status = _eatlas_search_files_status();
+	$aggregator_status = _eatlas_search_aggregator_status();
+
+	$remainings = array(
+		EATLAS_SEARCH_INDEX_NODE => $nodes_status['remaining'],
+		EATLAS_SEARCH_INDEX_FILE => $files_status['remaining'],
+		EATLAS_SEARCH_INDEX_RSS => $aggregator_status['remaining']
+	);
+
+	$limits = _eatlas_search_calculate_limits($remainings, $limit);
+
+	// Useful for debuging
+	//$total = $limits[EATLAS_SEARCH_INDEX_NODE] + $limits[EATLAS_SEARCH_INDEX_FILE] + $limits[EATLAS_SEARCH_INDEX_RSS];
+	//watchdog('eatlas_search', "LIMIT TOTAL: $total\nREMAININGS: " . print_r($remainings, TRUE) . "\nLIMITS: " . print_r($limits, TRUE));
+
+	_eatlas_search_node_update_index($limits[EATLAS_SEARCH_INDEX_NODE]);
+	_eatlas_search_file_update_index($limits[EATLAS_SEARCH_INDEX_FILE]);
+	_eatlas_search_aggregator_update_index($limits[EATLAS_SEARCH_INDEX_RSS]);
+}
+
+// Remove index orphan (index refering to node, files or RSS that has been deleted)
+function _eatlas_search_remove_orphan_index() {
+	// search_index
+	// Map references between indexed words VS where the words exists
+	$delete_index = db_delete('search_index', array('target' => 'slave'));
+	$delete_index->where(
+			'(type = :node AND sid NOT IN (SELECT nid from {node})) OR ' .
+			'(type = :file AND sid NOT IN (SELECT fid from {file_managed})) OR ' .
+			'(type = :rss AND sid NOT IN (SELECT iid from {aggregator_item}))',
+		array(
+			':node' => EATLAS_SEARCH_INDEX_NODE,
+			':file' => EATLAS_SEARCH_INDEX_FILE,
+			':rss' => EATLAS_SEARCH_INDEX_RSS
+		)
+	);
+	$num_words_deleted = $delete_index->execute();
+
+	// search_node_links (I don't know where this is used)
+	//     sid => Index element which has a link to the node (nid)
+	//     nid => Node refered by the link
+	$delete_node_links = db_delete('search_node_links', array('target' => 'slave'));
+	$delete_node_links->where(
+			'nid NOT IN (SELECT nid from {node}) OR ' .
+			'(type = :node AND sid NOT IN (SELECT nid from {node})) OR ' .
+			'(type = :file AND sid NOT IN (SELECT fid from {file_managed})) OR ' .
+			'(type = :rss AND sid NOT IN (SELECT iid from {aggregator_item}))',
+		array(
+			':node' => EATLAS_SEARCH_INDEX_NODE,
+			':file' => EATLAS_SEARCH_INDEX_FILE,
+			':rss' => EATLAS_SEARCH_INDEX_RSS
+		)
+	);
+	$num_links_deleted = $delete_node_links->execute();
+
+	// search_dataset
+	// Indexed items (nodes, files, rss, etc) and its metadata (re-index flag, indexed data, etc.)
+	$delete_dataset = db_delete('search_dataset', array('target' => 'slave'));
+	$delete_dataset->where(
+			'(type = :node AND sid NOT IN (SELECT nid from {node})) OR ' .
+			'(type = :file AND sid NOT IN (SELECT fid from {file_managed})) OR ' .
+			'(type = :rss AND sid NOT IN (SELECT iid from {aggregator_item}))',
+		array(
+			':node' => EATLAS_SEARCH_INDEX_NODE,
+			':file' => EATLAS_SEARCH_INDEX_FILE,
+			':rss' => EATLAS_SEARCH_INDEX_RSS
+		)
+	);
+	$num_dataset_deleted = $delete_dataset->execute();
+
+	// Construct a neat information message
+	//     "3 orphan indexes deleted (24 words references deleted, 4 links references deleted)"
+	$num_deleted_str = '';
+	if ($num_dataset_deleted) {
+		$num_deleted_str .= "$num_dataset_deleted orphan indexes deleted";
+	}
+	if ($num_words_deleted || $num_links_deleted) {
+		if (!$num_deleted_str) {
+			$num_deleted_str .= 'Orphan index deleted';
+		}
+		$num_deleted_str .= ' (';
+		if ($num_words_deleted) {
+			$num_deleted_str .= "$num_words_deleted words references deleted";
+		}
+		if ($num_links_deleted) {
+			if ($num_words_deleted) {
+				$num_deleted_str .= ', ';
+			}
+			$num_deleted_str .= "$num_links_deleted links references deleted";
+		}
+		$num_deleted_str .= ')';
+	}
+
+	if ($num_deleted_str) {
+		watchdog('eatlas_search', $num_deleted_str);
+	}
+}
+
+/**
+ * Distribute the limit across all the categories needed to be index,
+ * according to the remaining amount of items to index in each categories.
+ * Algo (example using 3 elements):
+ *     Order the categories (order by amount of item remaining to be indexed, smallest first)
+ *     If first one has more remaining than 1/3 of limit, index 1/3 of limit for all of them.
+ *     Else {
+ *         index the all the remaining element for the first, calculated the limit remaining.
+ *         If the 2nd one has more remaining than 1/2 of remaining limit, index 1/2 of remining limit for the rest.
+ *         Else index the all the remaining element for the 2nd one and index the remaining of limit for the last one.
+ *     }
+ */
+function _eatlas_search_calculate_limits($remainings, $limit) {
+	$length = count($remainings);
+	if ($limit < $length) {
+		$limit = $length;
+	}
+
+	// Order by value (remaining), lower first
+	asort($remainings);
+
+	// Prepare the associative array used to hold the results.
+	$limits = array();
+
+	// Calculate the best amount of items to index in each categories
+	$limit_rest = $limit;
+	while (!empty($remainings)) {
+		// reset - Set the internal pointer of an array to its first element
+		reset($remainings);
+		// key - Returns the index element of the current array position (the first key since we just did a reset)
+		$firstKey = key($remainings);
+		$length = count($remainings);
+		if ($remainings[$firstKey] < (int)$limit_rest/$length) {
+			$limits[$firstKey] = $remainings[$firstKey];
+			$limit_rest -= $remainings[$firstKey];
+			unset($remainings[$firstKey]);
+		} else {
+			foreach($remainings as $key => $remaining) {
+				// This may give slightly less than $limit (100 / 3 = 33.3, int cast = 33, total = 99)
+				// but limit is just a suggested max so it's ok.
+				$limits[$key] = (int)($limit_rest/$length);
+			}
+			$remainings = NULL;
+		}
+	}
+
+	return $limits;
+}
+
+// The search do not works well with some Unicode char (for example, the quote "'" is considered as been part of the word when the Unicode character "’" is used instead)
+function _eatlas_search_index($sid, $module, $text) {
+	search_index($sid, $module, _eatlas_search_replace_unicode($text));
+}
+?>

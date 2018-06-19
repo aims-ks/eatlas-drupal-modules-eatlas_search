@@ -1,0 +1,13 @@
+<?php
+
+/*
+// Implements: hook_install().
+function eatlas_search_install() {
+}
+
+// Implements: hook_uninstall()
+function eatlas_search_uninstall() {
+}
+*/
+
+?>
