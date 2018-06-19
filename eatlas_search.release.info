@@ -10,4 +10,4 @@ creator = Gael Lafond
 ;   Those properties are used with release_notes and tags.
 ;   See: https://www.drupal.org/documentation/releases/types
 ;Security update[] = Now more secure\nand private.
-New features[] = Added search for videos.
+Bug fixes[] = Suppress warning because searchExpression expects $modules to be a string.

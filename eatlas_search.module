@@ -514,7 +514,8 @@ function eatlas_search_search_execute($keys, $conditions) {
 
 	// Search in node, image and aggregator items ($keys is the search keywords)
 	// NOTE: [Undocumented feature] searchExpression accept array as value because it's sent to a "condition" which accept array.
-	$query->searchExpression($keys, $modules);
+	// Suppress warning because searchExpression expects $modules to be a string
+	@$query->searchExpression($keys, $modules);
 
 	// Only continue if the first pass query matches.
 	if (!$query->executeFirstPass()) {
