@@ -82,12 +82,9 @@ function eatlas_search_file_delete($file) {
 }
 
 
-
 /**************
  * INDEXATION *
  **************/
-
-
 
 function _eatlas_search_files_status() {
 	$total = db_query('SELECT COUNT(*) FROM {file_managed}')->fetchField();
