@@ -84,8 +84,7 @@ function _eatlas_search_get_advanced_search_config() {
 		array(
 			'id' => 'ea_mtd',
 			'label' => 'Metadata',
-			//'feed_ids' => array(40),
-			'content_types' => array('eatlas_georss_item'),
+			'content_types' => array('metadata_record'),
 			'default' => TRUE
 		),
 		array(
